@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 import json
@@ -12,10 +13,10 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # =====================================================================
 API_TOKEN = "9014835271:AAHOS9mg1Vmc8M1LuMMZNo5hO9RyUs2MsWM"
 PAYMENT_URL = "https://donatepay.ru/don/1499159"
-INVITE_LINK = "https://t.me/+iFmTmyT_u-dmYzQy"
+INVITE_LINK = "https://t.me/+iFmTmyT_u-dmYzQy"  # Резервная ссылка, если канал еще не привязан
 ADMIN_USERNAME = "atomprod_13"  # Юзернейм администратора (без @)
 
-# Файл для сохранения ID администратора, чтобы не сбивался при перезапуске
+# Файл для сохранения ID администратора и ID канала
 CONFIG_FILE = "admin_config.json"
 
 # Настройка логирования (вывод событий в консоль)
@@ -26,26 +27,45 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
 # =====================================================================
-# ФУНКЦИИ ДЛЯ РАБОТЫ С ID АДМИНИСТРАТОРА
+# ФУНКЦИИ ДЛЯ РАБОТЫ С НАСТРОЙКАМИ (ID АДМИНА И КАНАЛА)
 # =====================================================================
-def get_admin_id() -> int | None:
-    """Читает сохраненный числовой ID администратора из файла."""
+def load_config() -> dict:
+    """Читает сохраненные настройки из файла."""
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data.get("admin_id")
+                return json.load(f)
         except Exception as e:
             logging.error(f"Ошибка чтения конфига: {e}")
-    return None
+    return {}
 
-def save_admin_id(admin_id: int):
-    """Сохраняет числовой ID администратора в файл."""
+def save_config(data: dict):
+    """Сохраняет настройки в файл."""
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump({"admin_id": admin_id}, f)
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logging.error(f"Ошибка сохранения конфига: {e}")
+
+def get_admin_id() -> int | None:
+    """Возвращает числовой ID администратора."""
+    return load_config().get("admin_id")
+
+def save_admin_id(admin_id: int):
+    """Сохраняет числовой ID администратора."""
+    cfg = load_config()
+    cfg["admin_id"] = admin_id
+    save_config(cfg)
+
+def get_channel_id() -> int | None:
+    """Возвращает числовой ID закрытого канала."""
+    return load_config().get("channel_id")
+
+def save_channel_id(channel_id: int):
+    """Сохраняет числовой ID закрытого канала."""
+    cfg = load_config()
+    cfg["channel_id"] = channel_id
+    save_config(cfg)
 
 # =====================================================================
 # КЛАВИАТУРЫ
@@ -90,6 +110,32 @@ HELP_TEXT = (
 # =====================================================================
 # ОБРАБОТЧИКИ КОМАНД
 # =====================================================================
+
+@dp.channel_post(Command("setchannel"))
+async def cmd_set_channel(message: types.Message):
+    """
+    Команда для привязки закрытого канала.
+    Администратор добавляет бота в канал как админа и пишет в канал /setchannel.
+    """
+    save_channel_id(message.chat.id)
+    # Удаляем сообщение с командой из канала, чтобы подписчики его не видели
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    admin_id = get_admin_id()
+    if admin_id:
+        await bot.send_message(
+            chat_id=admin_id,
+            text=(
+                f"✅ <b>Канал успешно привязан!</b>\n"
+                f"Название: <b>{message.chat.title}</b>\n"
+                f"ID канала: <code>{message.chat.id}</code>\n\n"
+                f"Теперь при одобрении чеков бот будет автоматически создавать <b>одноразовые пригласительные ссылки</b> (на 1 человека)!"
+            ),
+            parse_mode="HTML"
+        )
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
@@ -210,26 +256,45 @@ async def handle_receipt_photo(message: types.Message):
 
 @dp.callback_query(F.data.startswith("approve_"))
 async def process_approve(callback: CallbackQuery):
-    """Администратор нажал 'Принять в канал'."""
+    """Администратор нажал 'Принять в канал' — создаем одноразовую ссылку."""
     user_id = int(callback.data.split("_")[1])
+    channel_id = get_channel_id()
+    invite_url = INVITE_LINK
+    link_type_note = "резервная ссылка отправлена"
+
+    # Если канал привязан, пробуем сгенерировать одноразовую ссылку (member_limit=1)
+    if channel_id:
+        try:
+            chat_invite = await bot.create_chat_invite_link(
+                chat_id=channel_id,
+                name=f"User_{user_id}",
+                member_limit=1
+            )
+            invite_url = chat_invite.invite_link
+            link_type_note = "одноразовая ссылка на 1 вход создана и отправлена"
+        except Exception as e:
+            logging.error(f"Ошибка создания одноразовой ссылки в канале {channel_id}: {e}")
+            await callback.message.answer(
+                f"⚠️ Не удалось создать одноразовую ссылку (проверьте, что бот является администратором канала с правом «Пригласительные ссылки»). Отправлена резервная ссылка.\nОшибка: {e}"
+            )
     
     try:
-        # Отправляем зрителю пригласительную ссылку
+        # Отправляем зрителю персональную одноразовую ссылку
         await bot.send_message(
             chat_id=user_id,
             text=(
                 "🎉 <b>Оплата подтверждена!</b>\n\n"
-                "Добро пожаловать! Вот ваша пригласительная ссылка для входа в канал:\n"
-                f"👉 {INVITE_LINK}"
+                "Добро пожаловать! Вот ваша <b>персональная одноразовая ссылка</b> для входа в канал (она сработает только 1 раз, не передавайте её другим):\n"
+                f"👉 {invite_url}"
             ),
             parse_mode="HTML",
             disable_web_page_preview=True
         )
         
         # Обновляем сообщение у администратора, убирая кнопки, чтобы не нажать дважды
-        new_caption = callback.message.caption + "\n\n✅ <b>РЕШЕНИЕ: Принят в канал (ссылка отправлена).</b>"
+        new_caption = callback.message.caption + f"\n\n✅ <b>РЕШЕНИЕ: Принят в канал ({link_type_note}).</b>"
         await callback.message.edit_caption(caption=new_caption, parse_mode="HTML", reply_markup=None)
-        await callback.answer("Ссылка успешно отправлена зрителю!")
+        await callback.answer("Одноразовая ссылка успешно отправлена зрителю!")
         
     except Exception as e:
         logging.error(f"Не удалось отправить ссылку пользователю {user_id}: {e}")
