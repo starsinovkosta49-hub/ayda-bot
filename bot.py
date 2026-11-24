@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 import json
@@ -13,10 +12,14 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # =====================================================================
 API_TOKEN = "9014835271:AAHOS9mg1Vmc8M1LuMMZNo5hO9RyUs2MsWM"
 PAYMENT_URL = "https://donatepay.ru/don/1499159"
-INVITE_LINK = "https://t.me/+iFmTmyT_u-dmYzQy"  # Резервная ссылка, если канал еще не привязан
+INVITE_LINK = "https://t.me/+iFmTmyT_u-dmYzQy"  # Резервная ссылка
 ADMIN_USERNAME = "atomprod_13"  # Юзернейм администратора (без @)
 
-# Файл для сохранения ID администратора и ID канала
+# ПОСТОЯННЫЕ ID (вшиты в код, чтобы никогда не сбрасывались при перезапуске)
+DEFAULT_ADMIN_ID = 5086900538
+DEFAULT_CHANNEL_ID = -1003968888741
+
+# Файл для сохранения ID администратора и ID канала (резервное хранилище)
 CONFIG_FILE = "admin_config.json"
 
 # Настройка логирования (вывод событий в консоль)
@@ -48,7 +51,9 @@ def save_config(data: dict):
         logging.error(f"Ошибка сохранения конфига: {e}")
 
 def get_admin_id() -> int | None:
-    """Возвращает числовой ID администратора."""
+    """Возвращает числовой ID администратора (приоритет у постоянного в коде)."""
+    if DEFAULT_ADMIN_ID is not None:
+        return int(DEFAULT_ADMIN_ID)
     return load_config().get("admin_id")
 
 def save_admin_id(admin_id: int):
@@ -58,7 +63,9 @@ def save_admin_id(admin_id: int):
     save_config(cfg)
 
 def get_channel_id() -> int | None:
-    """Возвращает числовой ID закрытого канала."""
+    """Возвращает числовой ID закрытого канала (приоритет у постоянного в коде)."""
+    if DEFAULT_CHANNEL_ID is not None:
+        return int(DEFAULT_CHANNEL_ID)
     return load_config().get("channel_id")
 
 def save_channel_id(channel_id: int):
@@ -115,10 +122,8 @@ HELP_TEXT = (
 async def cmd_set_channel(message: types.Message):
     """
     Команда для привязки закрытого канала.
-    Администратор добавляет бота в канал как админа и пишет в канал /setchannel.
     """
     save_channel_id(message.chat.id)
-    # Удаляем сообщение с командой из канала, чтобы подписчики его не видели
     try:
         await message.delete()
     except Exception:
@@ -140,16 +145,16 @@ async def cmd_set_channel(message: types.Message):
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
     """
-    Секретная команда для привязки аккаунта @atomprod_13 к боту.
-    Telegram не позволяет ботам писать первым по @username, поэтому админ
-    должен один раз написать боту /admin.
+    Секретная команда для привязки аккаунта администратора.
     """
     username = message.from_user.username
-    if username and username.lower() == ADMIN_USERNAME.lower():
+    if message.from_user.id == DEFAULT_ADMIN_ID or (username and username.lower() == ADMIN_USERNAME.lower()):
         save_admin_id(message.from_user.id)
         await message.answer(
-            f"✅ Отлично, @{username}! Ваш аккаунт успешно привязан как администратор.\n"
-            f"Теперь все скриншоты чеков от зрителей будут приходить сюда."
+            f"✅ Отлично! Ваш аккаунт привязан как администратор.\n"
+            f"Ваш User ID: <code>{message.from_user.id}</code>\n"
+            f"Теперь все скриншоты чеков от зрителей будут приходить сюда.",
+            parse_mode="HTML"
         )
     else:
         await message.answer("⛔ У вас нет прав для выполнения этой команды.")
@@ -157,11 +162,9 @@ async def cmd_admin(message: types.Message):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     """Обработчик команды /start."""
-    # Автоматическая привязка админа, если он просто нажал /start
-    if message.from_user.username and message.from_user.username.lower() == ADMIN_USERNAME.lower():
+    if message.from_user.id == DEFAULT_ADMIN_ID or (message.from_user.username and message.from_user.username.lower() == ADMIN_USERNAME.lower()):
         if get_admin_id() != message.from_user.id:
             save_admin_id(message.from_user.id)
-            await message.answer("🔔 <i>Системное уведомление: Вы автоматически авторизованы как администратор для приема чеков.</i>", parse_mode="HTML")
 
     await message.answer(
         text=WELCOME_TEXT,
@@ -208,19 +211,17 @@ async def handle_receipt_photo(message: types.Message):
     """Перехватывает фотографию от зрителя и пересылает администратору."""
     admin_id = get_admin_id()
     
-    # Если администратор еще ни разу не запускал бота
     if not admin_id:
         await message.answer(
             "⚠️ Администратор еще не активировал прием заявок в системе. "
             "Пожалуйста, попробуйте отправить чек чуть позже."
         )
-        logging.warning(f"Получен чек от {message.from_user.id}, но ADMIN_ID не установлен! Админ должен написать /start или /admin боту.")
+        logging.warning(f"Получен чек от {message.from_user.id}, но ADMIN_ID не установлен!")
         return
 
     user = message.from_user
     user_info = f"@{user.username}" if user.username else f"ID: {user.id} ({user.full_name})"
     
-    # Берем фото в наилучшем качестве (последний элемент массива)
     photo_id = message.photo[-1].file_id
 
     caption_for_admin = (
@@ -232,7 +233,6 @@ async def handle_receipt_photo(message: types.Message):
     )
 
     try:
-        # Отправляем фото администратору с кнопками выбора
         await bot.send_photo(
             chat_id=admin_id,
             photo=photo_id,
@@ -240,7 +240,6 @@ async def handle_receipt_photo(message: types.Message):
             reply_markup=get_admin_decision_keyboard(user.id),
             parse_mode="HTML"
         )
-        # Уведомляем зрителя
         await message.answer(
             "✅ <b>Ваш скриншот получен и отправлен на проверку!</b>\n"
             "Пожалуйста, ожидайте. Как только администратор проверит чек, бот пришлет вам ответ.",
@@ -262,7 +261,6 @@ async def process_approve(callback: CallbackQuery):
     invite_url = INVITE_LINK
     link_type_note = "резервная ссылка отправлена"
 
-    # Если канал привязан, пробуем сгенерировать одноразовую ссылку (member_limit=1)
     if channel_id:
         try:
             chat_invite = await bot.create_chat_invite_link(
@@ -279,7 +277,6 @@ async def process_approve(callback: CallbackQuery):
             )
     
     try:
-        # Отправляем зрителю персональную одноразовую ссылку
         await bot.send_message(
             chat_id=user_id,
             text=(
@@ -291,7 +288,6 @@ async def process_approve(callback: CallbackQuery):
             disable_web_page_preview=True
         )
         
-        # Обновляем сообщение у администратора, убирая кнопки, чтобы не нажать дважды
         new_caption = callback.message.caption + f"\n\n✅ <b>РЕШЕНИЕ: Принят в канал ({link_type_note}).</b>"
         await callback.message.edit_caption(caption=new_caption, parse_mode="HTML", reply_markup=None)
         await callback.answer("Одноразовая ссылка успешно отправлена зрителю!")
@@ -306,7 +302,6 @@ async def process_reject(callback: CallbackQuery):
     user_id = int(callback.data.split("_")[1])
     
     try:
-        # Просим зрителя проверить чек
         await bot.send_message(
             chat_id=user_id,
             text=(
@@ -320,7 +315,6 @@ async def process_reject(callback: CallbackQuery):
             parse_mode="HTML"
         )
         
-        # Обновляем сообщение у администратора
         new_caption = callback.message.caption + "\n\n❌ <b>РЕШЕНИЕ: Отклонено (отправлено уведомление об ошибке).</b>"
         await callback.message.edit_caption(caption=new_caption, parse_mode="HTML", reply_markup=None)
         await callback.answer("Зрителю отправлено уведомление об ошибке в чеке.")
@@ -358,7 +352,6 @@ async def handle_unknown(message: types.Message):
 # =====================================================================
 async def main():
     logging.info("Запуск Бот Айда!...")
-    # Удаляем вебхуки и пропускаем старые накопившиеся сообщения
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
